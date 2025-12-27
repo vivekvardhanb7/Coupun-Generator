@@ -240,14 +240,14 @@ if preview and people_file and coupon_file:
     st.stop()
 
 # ================= PDF GENERATION (ASYNC + FAST + ETA) =================
+# ================= PDF GENERATION (STREAMLIT CLOUD SAFE) =================
 if generate:
     if not people_file or not coupon_file:
         st.error("❌ Upload both Excel files")
         st.stop()
 
     import time
-    import asyncio
-    from playwright.async_api import async_playwright
+    from playwright.sync_api import sync_playwright
 
     people_df = pd.read_excel(people_file)
     coupon_df = pd.read_excel(coupon_file)
@@ -255,7 +255,6 @@ if generate:
     ids = extract_customer_ids(people_df)
     codes = extract_coupon_codes(coupon_df)
 
-    # Prepare tasks
     tasks, cursor = [], 0
     for cid in ids:
         chunk = codes[cursor:cursor + COUPONS_PER_CUSTOMER]
@@ -271,72 +270,48 @@ if generate:
     progress_bar.progress(0)
     status_text.info("🚀 Generating PDFs...")
 
-    async def run():
-        pdf_paths = []
-        start_time = time.time()
+    pdf_paths = []
+    start_time = time.time()
 
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=True,
-                args=[
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu"
-                ]
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+            ]
+        )
+
+        context = browser.new_context()
+
+        for i, (cid, coupons, expiry) in enumerate(tasks, start=1):
+            page = context.new_page()
+
+            page.set_content(
+                build_html(cid, coupons, expiry),
+                wait_until="networkidle"
             )
 
-            context = await browser.new_context()
+            page.evaluate("document.fonts.ready")
 
-            semaphore = asyncio.Semaphore(4)  # LIMIT parallelism (SAFE)
+            pdf_path = os.path.join(PDF_DIR, f"{cid}.pdf")
+            page.pdf(
+                path=pdf_path,
+                width=PAGE_WIDTH,
+                height=PAGE_HEIGHT,
+                print_background=True,
+                prefer_css_page_size=True
+            )
 
-            async def generate_pdf(i, task):
-                async with semaphore:
-                    cid, coupons, expiry = task
-                    page = await context.new_page()
+            page.close()
+            pdf_paths.append(pdf_path)
 
-                    await page.set_content(
-                        build_html(cid, coupons, expiry),
-                        wait_until="networkidle"
-                    )
+            progress_bar.progress(i / total)
+            status_text.info(f"📄 {i}/{total} PDFs generated")
 
-                    await page.evaluate("document.fonts.ready")
-
-                    pdf_path = os.path.join(PDF_DIR, f"{cid}.pdf")
-                    await page.pdf(
-                        path=pdf_path,
-                        width=PAGE_WIDTH,
-                        height=PAGE_HEIGHT,
-                        print_background=True,
-                        prefer_css_page_size=True
-                    )
-
-                    await page.close()
-
-                    # UI update
-                    elapsed = time.time() - start_time
-                    avg = elapsed / (i + 1)
-                    remaining = avg * (total - i - 1)
-
-                    progress_bar.progress((i + 1) / total)
-                    status_text.info(
-                        f"📄 {i+1}/{total} PDFs | ⏳ ETA: {int(remaining)} sec"
-                    )
-
-                    return pdf_path
-
-            coros = [
-                generate_pdf(i, task)
-                for i, task in enumerate(tasks)
-            ]
-
-            pdf_paths = await asyncio.gather(*coros)
-
-            await context.close()
-            await browser.close()
-
-        return pdf_paths
-
-    pdf_paths = asyncio.run(run())
+        context.close()
+        browser.close()
 
     # -------- ZIP Creation --------
     status_text.info("🗜️ Creating ZIP file...")
@@ -355,3 +330,4 @@ if generate:
             "NAF_Gutscheine.zip",
             mime="application/zip"
         )
+
