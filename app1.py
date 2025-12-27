@@ -1,5 +1,8 @@
 import sys
 import asyncio
+import nest_asyncio
+nest_asyncio.apply()
+
 
 # Windows fix for Playwright + Streamlit
 if sys.platform.startswith("win"):
